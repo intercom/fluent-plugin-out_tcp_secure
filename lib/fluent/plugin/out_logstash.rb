@@ -2,11 +2,11 @@ require 'socket'
 require 'openssl'
 require 'yajl'
 
-class Fluent::LoomsystemsOutput < Fluent::BufferedOutput
+class Fluent::LogstashOutput < Fluent::BufferedOutput
   class ConnectionFailure < StandardError; end
 
   # Register the plugin
-  Fluent::Plugin.register_output('loomsystems', self)
+  Fluent::Plugin.register_output('logstash', self)
   # Output settings
   config_param :use_json,       :bool,    :default => true
   config_param :include_tag_key,:bool,    :default => false
@@ -89,15 +89,15 @@ class Fluent::LoomsystemsOutput < Fluent::BufferedOutput
         messages.push record["message"].rstrip() + "\n"
       end
     end
-    send_to_loomsystems(messages)
+    send_to_logstash(messages)
   end
 
-  def send_to_loomsystems(data)   
+  def send_to_logstash(data)   
     retries = 0
 
     begin
-      log.trace "New attempt to loomsystems attempt=#{retries}" if retries > 0
-      log.trace "Send nb_event=#{data.size} events to loomsystems"
+      log.trace "New attempt to logstash attempt=#{retries}" if retries > 0
+      log.trace "Send nb_event=#{data.size} events to logstash"
       data.each do |event|
         client.write(event)
         @write_counter += 1
@@ -111,11 +111,11 @@ class Fluent::LoomsystemsOutput < Fluent::BufferedOutput
         a_couple_of_seconds = retries ** 2
         a_couple_of_seconds = 30 unless a_couple_of_seconds < 30
         retries += 1
-        log.warn "Could not push logs to loomsystems, attempt=#{retries} max_attempts=#{max_retries} wait=#{a_couple_of_seconds}s error=#{e.message}"
+        log.warn "Could not push logs to logstash, attempt=#{retries} max_attempts=#{max_retries} wait=#{a_couple_of_seconds}s error=#{e.message}"
         sleep a_couple_of_seconds
         retry
       end
-      raise ConnectionFailure, "Could not push logs to loomsystems after #{retries} retries, #{e.message}"
+      raise ConnectionFailure, "Could not push logs to logstash after #{retries} retries, #{e.message}"
     end
   end
 
