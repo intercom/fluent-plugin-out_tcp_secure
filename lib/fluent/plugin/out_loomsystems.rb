@@ -18,9 +18,11 @@ class Fluent::LoomsystemsOutput < Fluent::BufferedOutput
   config_param :port,           :integer, :default => 8888
   config_param :ssl_port,       :integer, :default => 9999
   config_param :max_retries,    :integer, :default => -1
+  config_param :rebind_interval,:integer, :default => 10000
 
   def initialize
     super
+    @write_counter = 0
   end
 
   # Define `log` method for v0.10.42 or earlier
@@ -39,27 +41,29 @@ class Fluent::LoomsystemsOutput < Fluent::BufferedOutput
 
   def shutdown
     log.info "----shutdown"
+    @_socket.close if @_socket
     super
   end
 
   def client
-   @_socket ||= if @use_ssl
-      log.info "opening ssl socket"
-      context    = OpenSSL::SSL::SSLContext.new
-      socket     = TCPSocket.new @host, @ssl_port
-      ssl_client = OpenSSL::SSL::SSLSocket.new socket, context
-      sock = ssl_client.connect
-    else
-      TCPSocket.new @host, @port
+    if @_socket.nil? || @write_counter >= @rebind_interval
+      @_socket&.close
+      @_socket = if @use_ssl
+        log.info "opening ssl socket"
+        context    = OpenSSL::SSL::SSLContext.new
+        socket     = TCPSocket.new @host, @ssl_port
+        ssl_client = OpenSSL::SSL::SSLSocket.new socket, context
+        ssl_client.connect
+      else
+        TCPSocket.new @host, @port
+      end
+      @_socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
+      @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPIDLE, 10)
+      @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPINTVL, 3)
+      @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPCNT, 3)
+      @write_counter = 0
     end
-
-    @_socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
-    @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPIDLE, 10)
-    @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPINTVL, 3)
-    @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPCNT, 3)
-
-    return @_socket
-
+    @_socket
   end
 
   # This method is called when an event reaches Fluentd.
@@ -86,29 +90,23 @@ class Fluent::LoomsystemsOutput < Fluent::BufferedOutput
       end
     end
     send_to_loomsystems(messages)
-
   end
 
   def send_to_loomsystems(data)   
     retries = 0
 
     begin
-
-      # Check the connectivity and write messages
-      #connected,x = client.recv(0)
-      #log.trace  "Connected=#{connected},#{x}"
-      #raise Errno::ECONNREFUSED, "Client has lost server connection" if connected == 0
       log.trace "New attempt to loomsystems attempt=#{retries}" if retries > 0
       log.trace "Send nb_event=#{data.size} events to loomsystems"
       data.each do |event|
         client.write(event)
+        @write_counter += 1
       end
-
 
     # Handle some failures
     rescue Errno::EHOSTUNREACH, Errno::ECONNREFUSED, Errno::ETIMEDOUT, Errno::EPIPE => e
 
-      if retries < @max_retries || max_retries == -1
+      if retries < @max_retries || @max_retries == -1
         @_socket = nil
         a_couple_of_seconds = retries ** 2
         a_couple_of_seconds = 30 unless a_couple_of_seconds < 30
