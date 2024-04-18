@@ -1,6 +1,7 @@
 require 'socket'
 require 'openssl'
 require 'yajl'
+require 'thread'
 
 class Fluent::LogstashOutput < Fluent::BufferedOutput
   class ConnectionFailure < StandardError; end
@@ -23,6 +24,7 @@ class Fluent::LogstashOutput < Fluent::BufferedOutput
   def initialize
     super
     @write_counter = 0
+    @mutex = Mutex.new
   end
 
   # Define `log` method for v0.10.42 or earlier
@@ -41,29 +43,33 @@ class Fluent::LogstashOutput < Fluent::BufferedOutput
 
   def shutdown
     log.info "----shutdown"
-    @_socket.close if @_socket
+    @mutex.synchronize {
+      @_socket.close if @_socket
+    }
     super
   end
 
   def client
-    if @_socket.nil? || @write_counter >= @rebind_interval
-      @_socket&.close
-      @_socket = if @use_ssl
-        log.info "opening ssl socket"
-        context    = OpenSSL::SSL::SSLContext.new
-        socket     = TCPSocket.new @host, @ssl_port
-        ssl_client = OpenSSL::SSL::SSLSocket.new socket, context
-        ssl_client.connect
-      else
-        TCPSocket.new @host, @port
+    @mutex.synchronize {
+      if @_socket.nil? || @write_counter >= @rebind_interval
+        @_socket&.close
+        @_socket = if @use_ssl
+          log.info "opening ssl socket"
+          context    = OpenSSL::SSL::SSLContext.new
+          socket     = TCPSocket.new @host, @ssl_port
+          ssl_client = OpenSSL::SSL::SSLSocket.new socket, context
+          ssl_client.connect
+        else
+          TCPSocket.new @host, @port
+        end
+        @_socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
+        @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPIDLE, 10)
+        @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPINTVL, 3)
+        @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPCNT, 3)
+        @write_counter = 0
       end
-      @_socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
-      @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPIDLE, 10)
-      @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPINTVL, 3)
-      @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPCNT, 3)
-      @write_counter = 0
-    end
-    @_socket
+      @_socket
+    }
   end
 
   # This method is called when an event reaches Fluentd.
@@ -94,29 +100,28 @@ class Fluent::LogstashOutput < Fluent::BufferedOutput
 
   def send_to_logstash(data)   
     retries = 0
-
     begin
-      log.trace "New attempt to logstash attempt=#{retries}" if retries > 0
-      log.trace "Send nb_event=#{data.size} events to logstash"
-      data.each do |event|
-        client.write(event)
-        @write_counter += 1
-      end
+      @mutex.synchronize {
+        log.trace "New attempt to logstash attempt=#{retries}" if retries > 0
+        log.trace "Send nb_event=#{data.size} events to logstash"
+        data.each do |event|
+          client.write(event)
+          @write_counter += 1
+        end
+      }
 
-    # Handle some failures
-    rescue Errno::EHOSTUNREACH, Errno::ECONNREFUSED, Errno::ETIMEDOUT, Errno::EPIPE => e
-
-      if retries < @max_retries || @max_retries == -1
-        @_socket = nil
-        a_couple_of_seconds = retries ** 2
-        a_couple_of_seconds = 30 unless a_couple_of_seconds < 30
-        retries += 1
-        log.warn "Could not push logs to logstash, attempt=#{retries} max_attempts=#{max_retries} wait=#{a_couple_of_seconds}s error=#{e.message}"
-        sleep a_couple_of_seconds
-        retry
-      end
-      raise ConnectionFailure, "Could not push logs to logstash after #{retries} retries, #{e.message}"
+      # Handle some failures
+      rescue Errno::EHOSTUNREACH, Errno::ECONNREFUSED, Errno::ETIMEDOUT, Errno::EPIPE => e
+        if retries < @max_retries || @max_retries == -1
+          @_socket = nil
+          a_couple_of_seconds = retries ** 2
+          a_couple_of_seconds = 30 unless a_couple_of_seconds < 30
+          retries += 1
+          log.warn "Could not push logs to logstash, attempt=#{retries} max_attempts=#{max_retries} wait=#{a_couple_of_seconds}s error=#{e.message}"
+          sleep a_couple_of_seconds
+          retry
+        end
+        raise ConnectionFailure, "Could not push logs to logstash after #{retries} retries, #{e.message}"
     end
   end
-
 end
