@@ -50,26 +50,24 @@ class Fluent::LogstashOutput < Fluent::BufferedOutput
   end
 
   def client
-    @mutex.synchronize {
-      if @_socket.nil? || @write_counter >= @rebind_interval
-        @_socket&.close
-        @_socket = if @use_ssl
-          log.info "opening ssl socket"
-          context    = OpenSSL::SSL::SSLContext.new
-          socket     = TCPSocket.new @host, @ssl_port
-          ssl_client = OpenSSL::SSL::SSLSocket.new socket, context
-          ssl_client.connect
-        else
-          TCPSocket.new @host, @port
-        end
-        @_socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
-        @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPIDLE, 10)
-        @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPINTVL, 3)
-        @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPCNT, 3)
-        @write_counter = 0
+    if @_socket.nil? || @write_counter >= @rebind_interval
+      @_socket&.close
+      @_socket = if @use_ssl
+        log.info "opening ssl socket"
+        context    = OpenSSL::SSL::SSLContext.new
+        socket     = TCPSocket.new @host, @ssl_port
+        ssl_client = OpenSSL::SSL::SSLSocket.new socket, context
+        ssl_client.connect
+      else
+        TCPSocket.new @host, @port
       end
-      @_socket
-    }
+      @_socket.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
+      @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPIDLE, 10)
+      @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPINTVL, 3)
+      @_socket.setsockopt(Socket::SOL_TCP, Socket::TCP_KEEPCNT, 3)
+      @write_counter = 0
+    end
+    @_socket
   end
 
   # This method is called when an event reaches Fluentd.
@@ -100,15 +98,14 @@ class Fluent::LogstashOutput < Fluent::BufferedOutput
 
   def send_to_logstash(data)   
     retries = 0
-    begin
-      @mutex.synchronize {
+    @mutex.synchronize {
+      begin
         log.trace "New attempt to logstash attempt=#{retries}" if retries > 0
         log.trace "Send nb_event=#{data.size} events to logstash"
         data.each do |event|
           client.write(event)
           @write_counter += 1
         end
-      }
 
       # Handle some failures
       rescue Errno::EHOSTUNREACH, Errno::ECONNREFUSED, Errno::ETIMEDOUT, Errno::EPIPE => e
@@ -122,6 +119,7 @@ class Fluent::LogstashOutput < Fluent::BufferedOutput
           retry
         end
         raise ConnectionFailure, "Could not push logs to logstash after #{retries} retries, #{e.message}"
-    end
+      end
+    }
   end
 end
